@@ -1,0 +1,4 @@
+alpaca-trade-api==3.2.0
+pandas>=2.0.0
+numpy>=1.20.0
+requests>=2.28.0
