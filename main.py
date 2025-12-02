@@ -1,9 +1,9 @@
 """
-VCP Hunter Bot v2.1 - Smart Filter Edition
+VCP Hunter Bot v2.1 - Ready to Run
 Updates:
-1. Smart Filter: Removes ETFs, Funds, Trusts based on name keywords
-2. Shows ALL signals (no limit)
-3. Auto-splits long Telegram messages
+1. Keys Hardcoded (No environment variables needed)
+2. Smart Filter: Removes ETFs, Funds, Trusts
+3. Shows ALL signals
 """
 
 import pandas as pd
@@ -14,13 +14,13 @@ from datetime import datetime, timedelta
 import alpaca_trade_api as tradeapi
 import time
 
-# ========== CONFIG ==========
-API_KEY = os.environ.get('ALPACA_API_KEY')
-SECRET_KEY = os.environ.get('ALPACA_SECRET_KEY')
+# ========== CONFIG (已填入您的 Keys) ==========
+API_KEY = 'PK7PDUTCS3VEBFVVHL2VONDFPF'
+SECRET_KEY = '8DHcMfeYcqznFyE7UWibe6LBU1ojeRoLJVQwUiFuGmWR'
 BASE_URL = 'https://paper-api.alpaca.markets'
 
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+TELEGRAM_TOKEN = '8183093878:AAHyQdT-wmAGw-6DH90rABKQl99i7eXtjnQ'
+TELEGRAM_CHAT_ID = '1028223709'
 
 CONFIG = {
     'ACCOUNT_SIZE': 100000,
@@ -33,10 +33,6 @@ CONFIG = {
 # ========== NOTIFICATION ==========
 def send_telegram(message):
     """Send message to Telegram with Auto-Split"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram keys missing.")
-        return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunk_size = 4000
     
@@ -64,7 +60,7 @@ def get_all_us_stocks(api):
         for a in assets:
             if a.exchange in ['NYSE', 'NASDAQ'] and a.tradable and a.marginable:
                 # Smart Filter: Check name for fund keywords
-                name_upper = a.name.upper()
+                name_upper = a.name.upper() if hasattr(a, 'name') else ""
                 is_noise = False
                 for kw in BLACKLIST:
                     if kw in name_upper:
@@ -86,8 +82,8 @@ def get_top_rs_stocks(api, symbols):
     """Filter by Price > $10 and Calculate RS"""
     print(f"🔄 Calculating Momentum (RS Score)...")
     
-    # In production, remove [:1000] to scan everything
-    universe = symbols[:1500] 
+    # Scanning first 2000 for better coverage
+    universe = symbols[:2000] 
     
     end = datetime.now()
     start = end - timedelta(days=100)
@@ -157,10 +153,6 @@ def analyze_vcp_setup(series):
 def run_vcp_scanner():
     print("🚀 VCP Hunter Bot Starting...")
     
-    if not API_KEY:
-        print("❌ Error: API Keys missing.")
-        return
-
     try:
         api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
         
@@ -220,7 +212,11 @@ def run_vcp_scanner():
     except Exception as e:
         err = f"❌ Scanner Error: {str(e)}"
         print(err)
-        send_telegram(err)
+        # Try to send error to Telegram so you know it failed
+        try:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                         json={"chat_id": TELEGRAM_CHAT_ID, "text": err})
+        except: pass
 
 if __name__ == "__main__":
     run_vcp_scanner()
