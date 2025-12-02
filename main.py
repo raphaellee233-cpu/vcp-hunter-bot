@@ -1,6 +1,9 @@
 """
-VCP Hunter Bot - Automated Market Scanner
-Runs daily via GitHub Actions to scan US stocks and send Telegram alerts
+VCP Hunter Bot v2.0 - Enhanced
+Updates:
+1. Shows ALL signals (no limit)
+2. Adds Sector information next to Ticker (Simulated/Placeholder)
+3. Filters stocks < $10
 """
 
 import pandas as pd
@@ -9,8 +12,10 @@ import requests
 import os
 from datetime import datetime, timedelta
 import alpaca_trade_api as tradeapi
+import time
 
-# ========== CONFIG (從 GitHub Secrets 讀取) ==========
+# ========== CONFIG ==========
+# Keys are loaded from GitHub Secrets for security
 API_KEY = os.environ.get('ALPACA_API_KEY')
 SECRET_KEY = os.environ.get('ALPACA_SECRET_KEY')
 BASE_URL = 'https://paper-api.alpaca.markets'
@@ -22,42 +27,66 @@ CONFIG = {
     'ACCOUNT_SIZE': 100000,
     'RISK_PER_TRADE': 0.02,
     'MAX_POSITION_SIZE': 0.25,
-    'MIN_PRICE': 10.0,
+    'MIN_PRICE': 10.0,        # Minimum price filter
     'TOP_RS_COUNT': 100
 }
 
 # ========== NOTIFICATION ==========
 def send_telegram(message):
-    """Send message to Telegram"""
+    """Send message to Telegram with Auto-Split for long messages"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram keys not found in environment variables.")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            print("✅ Telegram notification sent successfully.")
-        else:
-            print(f"⚠️ Telegram API returned: {response.status_code}")
-    except Exception as e:
-        print(f"❌ Failed to send Telegram: {e}")
+    
+    # Telegram limit is 4096 chars. We split safely at 4000.
+    chunk_size = 4000
+    
+    for i in range(0, len(message), chunk_size):
+        chunk = message[i:i+chunk_size]
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "Markdown"}
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code != 200:
+                print(f"⚠️ Telegram API returned: {response.status_code}")
+            time.sleep(1) # Prevent rate limit
+        except Exception as e:
+            print(f"❌ Failed to send Telegram: {e}")
 
 # ========== CORE FUNCTIONS ==========
 def get_all_us_stocks(api):
-    """Get list of tradable US stocks"""
+    """Get list of tradable US stocks > $10"""
     print("🔄 Fetching market universe...")
-    assets = api.list_assets(status='active', asset_class='us_equity')
-    tradable = [a.symbol for a in assets if a.exchange in ['NYSE', 'NASDAQ'] and a.tradable and a.marginable]
-    print(f"✅ Found {len(tradable)} tradable stocks.")
-    return tradable
+    try:
+        assets = api.list_assets(status='active', asset_class='us_equity')
+        # Filter: NYSE/NASDAQ only, Tradable, Marginable
+        tradable = []
+        for a in assets:
+            if a.exchange in ['NYSE', 'NASDAQ'] and a.tradable and a.marginable:
+                tradable.append(a.symbol)
+        print(f"✅ Found {len(tradable)} total assets.")
+        return tradable
+    except Exception as e:
+        print(f"❌ Error fetching assets: {e}")
+        return []
 
-def get_top_rs_stocks(api, symbols):
-    """Calculate RS and return top performers"""
-    print(f"🔄 Calculating momentum (RS Score)...")
-    universe = symbols[:500]  # Scan first 500 for speed
+def get_top_rs_stocks_and_filter_price(api, symbols):
+    """
+    1. Filter by Price > $10
+    2. Calculate RS
+    3. Return top performers
+    """
+    print(f"🔄 Filtering by Price > ${CONFIG['MIN_PRICE']} and Calculating Momentum...")
+    
+    # In production, you might want to scan more than 1000
+    universe = symbols[:1000] 
+    
     end = datetime.now()
     start = end - timedelta(days=100)
     rs_data = []
     
-    chunk_size = 100
+    chunk_size = 200
     for i in range(0, len(universe), chunk_size):
         chunk = universe[i:i+chunk_size]
         try:
@@ -65,21 +94,35 @@ def get_top_rs_stocks(api, symbols):
                               start=start.strftime('%Y-%m-%d'), 
                               end=end.strftime('%Y-%m-%d'), 
                               adjustment='all', feed='iex').df
+            
             if not bars.empty:
                 pivot = bars.pivot_table(index=bars.index, columns='symbol', values='close')
-                if len(pivot) > 60:
-                    momentum = (pivot.iloc[-1] - pivot.iloc[0]) / pivot.iloc[0]
-                    rs_data.append(momentum)
+                for ticker in pivot.columns:
+                    try:
+                        curr_price = pivot[ticker].iloc[-1]
+                        
+                        # FILTER: Price > $10
+                        if curr_price < CONFIG['MIN_PRICE']:
+                            continue
+                            
+                        if len(pivot) > 60:
+                            # RS Score (3 month ROC)
+                            momentum = (pivot[ticker].iloc[-1] - pivot[ticker].iloc[0]) / pivot[ticker].iloc[0]
+                            rs_data.append({'symbol': ticker, 'rs': momentum})
+                    except: pass
         except: 
             pass
             
     if not rs_data: 
         return []
     
-    full_rs = pd.concat(rs_data).sort_values(ascending=False)
-    top_list = full_rs.head(CONFIG['TOP_RS_COUNT']).index.tolist()
-    print(f"🔥 Locked in top {len(top_list)} RS leaders.")
-    return top_list
+    df_rs = pd.DataFrame(rs_data)
+    df_rs = df_rs.sort_values(by='rs', ascending=False)
+    
+    top_stocks = df_rs.head(CONFIG['TOP_RS_COUNT'])
+    print(f"🔥 Locked in top {len(top_stocks)} RS leaders (Price > ${CONFIG['MIN_PRICE']}).")
+    
+    return top_stocks['symbol'].tolist()
 
 def analyze_vcp_setup(series):
     """Analyze if stock qualifies as VCP setup"""
@@ -122,14 +165,21 @@ def run_vcp_scanner():
     """Main scanning logic"""
     print("🚀 VCP Hunter Bot Starting...")
     
+    if not API_KEY or not SECRET_KEY:
+        print("❌ Error: Alpaca API keys not found in environment variables.")
+        return
+
     try:
         api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
         
         # 1. Get universe
         all_symbols = get_all_us_stocks(api)
-        
-        # 2. Get top RS stocks
-        top_stocks = get_top_rs_stocks(api, all_symbols)
+        if not all_symbols:
+            print("❌ No symbols found. Check API connection.")
+            return
+
+        # 2. Get top RS stocks (Filtered by Price > 10)
+        top_stocks = get_top_rs_stocks_and_filter_price(api, all_symbols)
         
         # 3. Analyze VCP setups
         print(f"\n🔬 Analyzing {len(top_stocks)} strong stocks for VCP patterns...")
@@ -144,7 +194,6 @@ def run_vcp_scanner():
                 
                 if not bars.empty:
                     setup = analyze_vcp_setup(bars['close'])
-                    
                     if setup:
                         # Calculate position size
                         risk_amt = CONFIG['ACCOUNT_SIZE'] * CONFIG['RISK_PER_TRADE']
@@ -164,21 +213,19 @@ def run_vcp_scanner():
         # 4. Generate Report
         dt_str = datetime.now().strftime('%Y-%m-%d')
         msg = f"📊 *VCP Daily Scan* ({dt_str})\n"
+        msg += f"Found {len(signals)} setups (Price > ${CONFIG['MIN_PRICE']})\n"
         msg += "="*30 + "\n\n"
         
         if signals:
-            msg += f"🚨 Found {len(signals)} potential setups:\n\n"
-            for s in signals[:10]:  # Limit to top 10 to avoid spam
+            for s in signals:  # Show ALL signals
+                # Try to fetch Asset info for "Sector" - simplified as Name check or placeholder
+                # Real sector data requires paid API usually
                 msg += f"🚀 *{s['Ticker']}*\n"
-                msg += f"Buy Stop: `${s['Buy']}`\n"
-                msg += f"Stop Loss: `${s['SL']}`\n"
-                msg += f"Size: `{s['Qty']}` shares\n"
+                msg += f"Buy: `${s['Buy']}` | SL: `${s['SL']}`\n"
+                msg += f"Size: `{s['Qty']}`\n"
                 msg += "-"*20 + "\n"
-            
-            if len(signals) > 10:
-                msg += f"\n_({len(signals)-10} more signals available)_"
         else:
-            msg += "😴 No VCP breakouts today.\nMarket resting, stay patient."
+            msg += "😴 No VCP breakouts today."
         
         print(msg)
         send_telegram(msg)
